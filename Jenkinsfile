@@ -35,7 +35,7 @@ pipeline {
             agent {
                 docker {
                     image 'maven:3.9-eclipse-temurin-21'
-                    args '-v $HOME/.m2:/root/.m2'
+                    // Fixed: No volume mount to avoid permission issues
                     reuseNode true
                 }
             }
@@ -54,25 +54,20 @@ pipeline {
             steps {
                 script {
                     echo "🐳 Building Docker image..."
-                    sh """
-                        docker build -t ${REGISTRY}/${IMAGE_NAME}:latest .
-                    """
+                    sh "docker build -t ${REGISTRY}/${IMAGE_NAME}:latest ."
                 }
             }
         }
 
         stage('Push Docker Image') {
-            when {
-                expression { return env.DOCKERHUB_TOKEN && env.DOCKERHUB_USER }
-            }
             steps {
                 script {
                     echo "📦 Pushing Docker image to Docker Hub..."
                     withCredentials([usernamePassword(credentialsId: 'Docker-token', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_TOKEN')]) {
-                        sh """
-                            echo \$DOCKERHUB_TOKEN | docker login -u \$DOCKERHUB_USER --password-stdin
+                        sh '''
+                            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USER --password-stdin
                             docker push ${REGISTRY}/${IMAGE_NAME}:latest
-                        """
+                        '''
                     }
                 }
             }

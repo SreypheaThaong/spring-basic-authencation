@@ -1,4 +1,4 @@
-FROM eclipse-temurin:17-jdk-alpine AS build
+FROM eclipse-temurin:21-jdk-alpine-3.22 AS build
 
 # Install Maven and Gradle
 RUN apk add --no-cache maven gradle
@@ -21,7 +21,7 @@ RUN if [ "$BUILD_TOOL" = "gradle" ]; then \
     fi
 
 # Runtime stage
-FROM eclipse-temurin:17-jre-alpine
+FROM eclipse-temurin:21-jre-alpine
 
 WORKDIR /app
 

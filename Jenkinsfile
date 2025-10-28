@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     environment {
-        REGISTRY = "phea12"                // 🔧 Change to your Docker Hub username
-        IMAGE_NAME = "spring-homework-image" // 🔧 Change to your image name
+        REGISTRY = "phea12"
+        IMAGE_NAME = "spring-homework-image"
         APP_PORT = "8080"
     }
 
@@ -25,13 +25,20 @@ pipeline {
                         env.BUILD_TOOL = "gradle"
                         echo "🧩 Detected Gradle project."
                     } else {
-                        error "❌ No build.gradle or pom.xml found! Cannot determine build tool."
+                        error "❌ No build.gradle or pom.xml found!"
                     }
                 }
             }
         }
 
         stage('Build JAR') {
+            agent {
+                docker {
+                    image 'maven:3.9-eclipse-temurin-21'
+                    args '-v $HOME/.m2:/root/.m2'
+                    reuseNode true
+                }
+            }
             steps {
                 script {
                     if (env.BUILD_TOOL == "maven") {
@@ -61,10 +68,12 @@ pipeline {
             steps {
                 script {
                     echo "📦 Pushing Docker image to Docker Hub..."
-                    sh """
-                        echo ${DOCKERHUB_TOKEN} | docker login -u ${DOCKERHUB_USER} --password-stdin
-                        docker push ${REGISTRY}/${IMAGE_NAME}:latest
-                    """
+                    withCredentials([usernamePassword(credentialsId: 'Docker-token', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+                        sh """
+                            echo \$DOCKERHUB_TOKEN | docker login -u \$DOCKERHUB_USER --password-stdin
+                            docker push ${REGISTRY}/${IMAGE_NAME}:latest
+                        """
+                    }
                 }
             }
         }
@@ -74,11 +83,8 @@ pipeline {
                 expression { return fileExists('k8s/deployment.yaml') }
             }
             steps {
-                echo "🚀 Deploying to Kubernetes via ArgoCD or kubectl..."
-                sh """
-                    # Example deploy command (customize as needed)
-                    kubectl apply -f k8s/
-                """
+                echo "🚀 Deploying to Kubernetes..."
+                sh "kubectl apply -f k8s/"
             }
         }
     }

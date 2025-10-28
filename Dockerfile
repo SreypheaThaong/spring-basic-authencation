@@ -1,41 +1,43 @@
 # ================================
-# Stage 1: Build stage
+# Stage 1: Build JAR (Maven OR Gradle)
 # ================================
 FROM eclipse-temurin:21-jdk AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Copy build definition files first (for better caching)
-COPY pom.xml* build.gradle* gradlew* settings.gradle* ./
+# ---- Copy only build-definition files first (cache) ----
+COPY pom.xml* build.gradle* build.gradle.kts* gradlew* settings.gradle* ./
 COPY gradle ./gradle
 
-# Detect and build using Maven or Gradle
-RUN echo "📦 Detecting build tool..." && \
-    if [ -f "pom.xml" ]; then \
-        echo "🚀 Building with Maven..."; \
-        apt-get update && apt-get install -y maven && \
-        mvn -B -DskipTests clean package; \
-    elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then \
-        echo "🚀 Building with Gradle..."; \
-        chmod +x gradlew || true && ./gradlew build -x test; \
-    else \
-        echo "❌ No Maven or Gradle build file found!" && exit 1; \
+# ---- Install Maven only if pom.xml exists (optional, cheap) ----
+RUN if [ -f pom.xml ]; then \
+        apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Copy the rest of the project
+# ---- Build the JAR (Maven OR Gradle) ----
+RUN echo "Detecting build tool..." && \
+    if [ -f pom.xml ]; then \
+        echo "Building with Maven"; \
+        mvn -B -DskipTests clean package; \
+    elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
+        echo "Building with Gradle"; \
+        chmod +x gradlew && ./gradlew build -x test; \
+    else \
+        echo "No pom.xml / build.gradle found!"; exit 1; \
+    fi
+
+# ---- Copy full source (now we have the JAR) ----
 COPY . .
 
-# Re-run build with full source (if needed)
-RUN if [ -f "pom.xml" ]; then \
+# ---- (Optional) Re-run the build with full source – some projects need it ----
+RUN if [ -f pom.xml ]; then \
         mvn -B -DskipTests clean package; \
-    elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then \
+    elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
         ./gradlew build -x test; \
     fi
 
-
 # ================================
-# Stage 2: Runtime stage
+# Stage 2: Runtime (tiny Alpine JRE)
 # ================================
 FROM eclipse-temurin:21-jre-alpine AS runner
 
@@ -43,21 +45,15 @@ WORKDIR /app
 EXPOSE 8080
 ENV JAVA_OPTS=""
 
-# Copy both possible JAR outputs safely (Maven or Gradle)
-COPY --from=builder /app /tmp/app
-
+# Find the built JAR (Maven → target/*.jar, Gradle → build/libs/*.jar)
+COPY --from=builder /app /tmp/build
 RUN set -eux; \
-    # Find built JAR file from Maven or Gradle output
-    JAR_FILE=$(find /tmp/app -type f -name "*.jar" | head -n 1); \
-    if [ -z "$JAR_FILE" ]; then \
-        echo "❌ No JAR file found in builder stage!"; \
-        exit 1; \
-    fi; \
-    cp "$JAR_FILE" /app/app.jar
+    JAR=$(find /tmp/build -type f \( -name "*.jar" -o -name "*.war" \) -print -quit); \
+    if [ -z "$JAR" ]; then echo "No JAR found!"; exit 1; fi; \
+    cp "$JAR" /app/app.jar; \
+    rm -rf /tmp/build
 
-# Health check (optional)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s \
   CMD wget -qO- http://localhost:8080/actuator/health | grep '"status":"UP"' || exit 1
 
-# Run the Spring Boot application
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]

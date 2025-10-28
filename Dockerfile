@@ -1,46 +1,63 @@
-# =============================
-# Stage 1: Build the application
-# =============================
+# ================================
+# Stage 1: Build stage
+# ================================
 FROM eclipse-temurin:21-jdk AS builder
 
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Copy build files first
+# Copy build definition files first (for better caching)
 COPY pom.xml* build.gradle* gradlew* settings.gradle* ./
 COPY gradle ./gradle
 
-# Install dependencies (handle both Maven and Gradle)
-RUN if [ -f "pom.xml" ]; then \
-      echo "Detected Maven project. Building with Maven..." && \
-      apt-get update && apt-get install -y maven && \
-      mvn dependency:go-offline; \
-    elif [ -f "build.gradle" ]; then \
-      echo "Detected Gradle project. Building with Gradle..." && \
-      chmod +x gradlew && ./gradlew dependencies; \
+# Detect and build using Maven or Gradle
+RUN echo "📦 Detecting build tool..." && \
+    if [ -f "pom.xml" ]; then \
+        echo "🚀 Building with Maven..."; \
+        apt-get update && apt-get install -y maven && \
+        mvn -B -DskipTests clean package; \
+    elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then \
+        echo "🚀 Building with Gradle..."; \
+        chmod +x gradlew || true && ./gradlew build -x test; \
+    else \
+        echo "❌ No Maven or Gradle build file found!" && exit 1; \
     fi
 
-# Copy the source code
-COPY src ./src
+# Copy the rest of the project
+COPY . .
 
-# Build the app (handle both Maven and Gradle)
+# Re-run build with full source (if needed)
 RUN if [ -f "pom.xml" ]; then \
-      mvn clean package -DskipTests; \
-    elif [ -f "build.gradle" ]; then \
-      ./gradlew clean build -x test; \
+        mvn -B -DskipTests clean package; \
+    elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then \
+        ./gradlew build -x test; \
     fi
 
-# =============================
-# Stage 2: Run the application
-# =============================
-FROM eclipse-temurin:21-jre
+
+# ================================
+# Stage 2: Runtime stage
+# ================================
+FROM eclipse-temurin:21-jre-alpine AS runner
 
 WORKDIR /app
-
-# Copy the jar file from builder
-COPY --from=builder /app/target/*.jar app.jar 2>/dev/null || \
-    COPY --from=builder /app/build/libs/*.jar app.jar
-
 EXPOSE 8080
+ENV JAVA_OPTS=""
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# Copy both possible JAR outputs safely (Maven or Gradle)
+COPY --from=builder /app /tmp/app
+
+RUN set -eux; \
+    # Find built JAR file from Maven or Gradle output
+    JAR_FILE=$(find /tmp/app -type f -name "*.jar" | head -n 1); \
+    if [ -z "$JAR_FILE" ]; then \
+        echo "❌ No JAR file found in builder stage!"; \
+        exit 1; \
+    fi; \
+    cp "$JAR_FILE" /app/app.jar
+
+# Health check (optional)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s \
+  CMD wget -qO- http://localhost:8080/actuator/health | grep '"status":"UP"' || exit 1
+
+# Run the Spring Boot application
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]

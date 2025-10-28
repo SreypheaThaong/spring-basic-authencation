@@ -1,59 +1,39 @@
-# ================================
-# Stage 1: Build JAR (Maven OR Gradle)
-# ================================
-FROM eclipse-temurin:21-jdk AS builder
+FROM eclipse-temurin:17-jdk-alpine AS build
+
+# Install Maven and Gradle
+RUN apk add --no-cache maven gradle
 
 WORKDIR /app
 
-# ---- Copy only build-definition files first (cache) ----
-COPY pom.xml* build.gradle* build.gradle.kts* gradlew* settings.gradle* ./
-COPY gradle ./gradle
-
-# ---- Install Maven only if pom.xml exists (optional, cheap) ----
-RUN if [ -f pom.xml ]; then \
-        apt-get update && apt-get install -y maven && rm -rf /var/lib/apt/lists/*; \
-    fi
-
-# ---- Build the JAR (Maven OR Gradle) ----
-RUN echo "Detecting build tool..." && \
-    if [ -f pom.xml ]; then \
-        echo "Building with Maven"; \
-        mvn -B -DskipTests clean package; \
-    elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
-        echo "Building with Gradle"; \
-        chmod +x gradlew && ./gradlew build -x test; \
-    else \
-        echo "No pom.xml / build.gradle found!"; exit 1; \
-    fi
-
-# ---- Copy full source (now we have the JAR) ----
+# Copy project files
 COPY . .
 
-# ---- (Optional) Re-run the build with full source – some projects need it ----
-RUN if [ -f pom.xml ]; then \
-        mvn -B -DskipTests clean package; \
-    elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then \
-        ./gradlew build -x test; \
+# Build argument to determine build tool
+ARG BUILD_TOOL=maven
+
+# Build the application based on BUILD_TOOL
+RUN if [ "$BUILD_TOOL" = "gradle" ]; then \
+        gradle clean build -x test --no-daemon; \
+        cp build/libs/*.jar app.jar; \
+    else \
+        mvn clean package -DskipTests; \
+        cp target/*.jar app.jar; \
     fi
 
-# ================================
-# Stage 2: Runtime (tiny Alpine JRE)
-# ================================
-FROM eclipse-temurin:21-jre-alpine AS runner
+# Runtime stage
+FROM eclipse-temurin:17-jre-alpine
 
 WORKDIR /app
+
+# Copy the built jar from build stage
+COPY --from=build /app/app.jar app.jar
+
+# Expose port
 EXPOSE 8080
-ENV JAVA_OPTS=""
 
-# Find the built JAR (Maven → target/*.jar, Gradle → build/libs/*.jar)
-COPY --from=builder /app /tmp/build
-RUN set -eux; \
-    JAR=$(find /tmp/build -type f \( -name "*.jar" -o -name "*.war" \) -print -quit); \
-    if [ -z "$JAR" ]; then echo "No JAR found!"; exit 1; fi; \
-    cp "$JAR" /app/app.jar; \
-    rm -rf /tmp/build
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s \
-  CMD wget -qO- http://localhost:8080/actuator/health | grep '"status":"UP"' || exit 1
-
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+# Run the application
+ENTRYPOINT ["java", "-jar", "app.jar"]

@@ -2,49 +2,52 @@ pipeline {
     agent any
 
     environment {
-        REGISTRY = "phea12"
-        IMAGE_NAME = "spring-homework-image"
-        APP_PORT = "8080"
+        DOCKER_IMAGE = 'phea12/spring-homework-image'
+        DOCKER_TAG = "${env.BUILD_NUMBER}"
+        DOCKERHUB_CREDENTIALS = credentials('dockerhub-token')
+        GITHUB_CREDENTIALS = credentials('github-token')
+
+        // Auto-detect build tool (Maven or Gradle)
+        BUILD_TOOL = fileExists('pom.xml') ? 'maven' : 'gradle'
+    }
+
+    tools {
+        maven 'Maven3'
+        gradle 'Gradle7'
+        jdk 'JDK17'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                echo "📥 Checking out source code..."
-                checkout scm
+                git credentialsId: 'github-token',
+                    url: "${env.GIT_URL}",
+                    branch: "${env.BRANCH_NAME ?: 'main'}"
             }
         }
 
-        stage('Detect Build Tool') {
+        stage('Build & Test') {
             steps {
                 script {
-                    if (fileExists('pom.xml')) {
-                        env.BUILD_TOOL = "maven"
-                        echo "🧩 Detected Maven project."
-                    } else if (fileExists('build.gradle') || fileExists('build.gradle.kts')) {
-                        env.BUILD_TOOL = "gradle"
-                        echo "🧩 Detected Gradle project."
+                    if (env.BUILD_TOOL == 'maven') {
+                        sh 'mvn clean package'
                     } else {
-                        error "❌ No build.gradle or pom.xml found!"
+                        sh 'gradle clean build'
                     }
                 }
             }
         }
 
-        stage('Build JAR') {
-            agent {
-                docker {
-                    image 'maven:3.9-eclipse-temurin-21'
-                    // Fixed: No volume mount to avoid permission issues
-                    reuseNode true
-                }
+        stage('SonarQube Analysis') {
+            when {
+                expression { return fileExists('sonar-project.properties') }
             }
             steps {
                 script {
-                    if (env.BUILD_TOOL == "maven") {
-                        sh 'mvn -B -DskipTests clean package'
-                    } else if (env.BUILD_TOOL == "gradle") {
-                        sh './gradlew build -x test'
+                    if (env.BUILD_TOOL == 'maven') {
+                        sh 'mvn sonar:sonar'
+                    } else {
+                        sh 'gradle sonarqube'
                     }
                 }
             }
@@ -53,43 +56,56 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    echo "🐳 Building Docker image..."
-                    sh "docker build -t ${REGISTRY}/${IMAGE_NAME}:latest ."
+                    sh """
+                        docker build \
+                            --build-arg BUILD_TOOL=${env.BUILD_TOOL} \
+                            -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                            -t ${DOCKER_IMAGE}:latest \
+                            .
+                    """
                 }
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Push to DockerHub') {
             steps {
                 script {
-                    echo "📦 Pushing Docker image to Docker Hub..."
-                    withCredentials([usernamePassword(credentialsId: 'Docker-token', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_TOKEN')]) {
-                        sh '''
-                            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USER --password-stdin
-                            docker push ${REGISTRY}/${IMAGE_NAME}:latest
-                        '''
-                    }
+                    sh 'echo $DOCKERHUB_CREDENTIALS_PSW | docker login -u $DOCKERHUB_CREDENTIALS_USR --password-stdin'
+                    sh "docker push ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                    sh "docker push ${DOCKER_IMAGE}:latest"
                 }
             }
         }
 
-        stage('Deploy (Optional)') {
-            when {
-                expression { return fileExists('k8s/deployment.yaml') }
-            }
+        stage('Clean Up') {
             steps {
-                echo "🚀 Deploying to Kubernetes..."
-                sh "kubectl apply -f k8s/"
+                sh "docker rmi ${DOCKER_IMAGE}:${DOCKER_TAG} || true"
+                sh "docker rmi ${DOCKER_IMAGE}:latest || true"
+                sh 'docker logout'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    // Example deployment - adjust based on your infrastructure
+                    echo "Deploying ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                    // Add your deployment commands here
+                    // e.g., kubectl, docker-compose, AWS ECS, etc.
+                }
             }
         }
     }
 
     post {
+        always {
+            cleanWs()
+        }
         success {
-            echo "✅ Build and Docker image creation successful!"
+            echo 'Pipeline executed successfully!'
         }
         failure {
-            echo "❌ Build failed! Check logs for details."
+            echo 'Pipeline failed!'
         }
     }
 }
